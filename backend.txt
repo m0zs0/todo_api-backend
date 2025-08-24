@@ -1,0 +1,954 @@
+Laravel alkalmazás todo_api néven. 
+Két tábla: users, todos. 
+Minden user csak a saját todoját tudja CRUD-olni, de legyen egy admin, aki mindenkijét tudja CRUD-olni. 
+
+ELŐKÉSZÍTÉS:
+-----------
+-XAMPP Apache, PHP indítása
+-phpmyadmin: adatbázis létrehozása: todo_db
+-cd todo_api
+  composer create-project laravel/laravel backend
+-cd backend
+  composer require laravel/sanctum
+-.env fájl szerkesztése
+  DB_CONNECTION=mysql
+  DB_HOST=127.0.0.1
+  DB_PORT=3306
+  DB_DATABASE=todo_db2
+  DB_USERNAME=root
+  DB_PASSWORD=
+MIGRÁCIÓK:
+----------
+-database/migrations/YYYY_MM_DD_HHMMSS_create_users_table.php új mező hozzáadása:
+  $table->boolean('is_admin')->default(false);
+-todos tábla létrehozása
+  php artisan make:migration create_todos_table
+-database/migrations/YYYY_MM_DD_HHMMSS_create_todos_table.php új mezők beírása:
+  $table->foreignId('user_id')->constrained()->onDelete('cascade');
+  $table->string('title');
+  $table->text('description')->nullable();
+  $table->boolean('completed')->default(false);
+-a personal_access_tokens nevű táblát a Laravel Sanctum hozza létre
+  php artisan vendor:publish --provider="Laravel\Sanctum\SanctumServiceProvider"
+-migrációk futtatása
+  php artisan migrate
+
+
+MODELLEK:
+---------
+
+-Todo modell létrehozása
+  php artisan make:model Todo
+-app/Models/Todo.php szerkesztése:
+  <?php
+
+  namespace App\Models;
+
+  use Illuminate\Database\Eloquent\Model;
+  // teszteléshez adatokat generáló trait
+  use Illuminate\Database\Eloquent\Factories\HasFactory;
+  use App\Models\User;
+
+  class Todo extends Model
+  {
+      use HasFactory;
+
+      protected $fillable = [
+          'user_id',
+          'title',
+          'description',
+          'completed',
+      ];
+
+      // automatikusan átalakítja az adatbázisból lekért értékeket PHP típusokká és viszont
+      protected $casts = [
+          'completed' => 'boolean',
+      ];
+
+      //Minden Todo elemhez egy User tartozik (több Todo is lehet egy Userhez)
+      public function user()
+      {
+          return $this->belongsTo(User::class);
+      }
+  }
+-app/Models/User.php módosítása:
+  <?php
+
+  namespace App\Models;
+
+  // use Illuminate\Contracts\Auth\MustVerifyEmail;
+  use Illuminate\Database\Eloquent\Factories\HasFactory;
+  use Illuminate\Foundation\Auth\User as Authenticatable;
+  use Illuminate\Notifications\Notifiable;
+  use Laravel\Sanctum\HasApiTokens;
+  use App\Models\Todo;
+
+  class User extends Authenticatable
+  {
+      /** @use HasFactory<\Database\Factories\UserFactory> */
+      use HasApiTokens, HasFactory, Notifiable;
+
+      /**
+       * The attributes that are mass assignable.
+       *
+       * @var list<string>
+       */
+      protected $fillable = [
+          'name',
+          'email',
+          'password',
+          'is_admin',
+      ];
+
+      /**
+       * The attributes that should be hidden for serialization.
+       *
+       * @var list<string>
+       */
+      protected $hidden = [
+          'password',
+          'remember_token',
+      ];
+
+      /**
+       * Get the attributes that should be cast.
+       *
+       * @return array<string, string>
+       */
+      // automatikusan átalakítja az adatbázisból lekért értékeket PHP típusokká és viszont
+      protected function casts(): array
+      {
+          return [
+              'email_verified_at' => 'datetime',
+              'password' => 'hashed',
+              'is_admin' => 'boolean',
+          ];
+      }
+
+      // Egy Userhez több Todo elem is tartozhat
+      public function todos()
+      {
+          return $this->hasMany(Todo::class); // kapcsolódó modell osztályának neve   
+      }
+  }
+
+API 
+---
+-api.php létrehozása
+  php artisan install:api
+-app/routes/api.php módosítása
+  Route::get('/ping', function () {
+      return response()->json(['message' => 'API működik']);
+  });
+-teszt: 
+  php artisan serve
+  GET localhost:8000/api/ping
+
+CONTROLLEREK:
+-------------
+
+-AuthController létrehozása
+  php artisan make:controller AuthController
+-app/Http/Controllers/AuthController.php módosítása:
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use App\Models\User;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Auth;
+
+class AuthController extends Controller
+{
+    public function register(Request $request): JsonResponse
+    {
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+        ]);
+
+        
+        return response()->json(['user' => $user, 'message' => 'Sikeres regisztráció'], 201);
+    }
+
+    
+    public function login(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email',
+            'password' => 'required',
+        ]);
+
+        if (!Auth::attempt($request->only('email', 'password'))) {
+            return response()->json(['message' => 'Hibás adatok'], 401);
+        }
+
+        $user = Auth::user();
+        $token = $user->createToken('auth_token')->plainTextToken;
+
+        return response()->json([
+            'access_token' => $token,
+            'token_type' => 'Bearer',
+        ]);
+    }
+
+    
+    public function logout(Request $request)
+    {
+        $request->user()->tokens()->delete();
+
+        return response()->json(['message' => 'Sikeres kijelentkezés']);
+    }
+
+}
+
+-app/routes/api.php módosítása
+use App\Http\Controllers\AuthController;
+
+Route::post('/register', [AuthController::class, 'register']);
+Route::post('/login', [AuthController::class, 'login']);
+Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
+
+-tesztelés:
+  register()
+    POST http://localhost:8000/api/register
+         Headers: Content-Type: application/json; Accept: application/json
+         Body raw JSON: {"name":"monoki","email":"monoki@example.com","password":"Jelszo_2025", "password_confirmation": "Jelszo_2025"}
+	 -> "Sikeres regisztráció"	
+  login()
+    POST http://localhost:8000/api/login
+         Headers: Content-Type: application/json; Accept: application/json
+         Body raw JSON: {"email":"monoki@example.com","password":"Jelszo_2025"}
+	 -> "Bearer" "1|xgTuLgQ6q0DESOQsDqCC5FKicoaa0rKX2G..."
+  logout()
+    POST http://localhost:8000/api/logout
+         Headers: Content-Type: application/json; Accept: application/json; Authorization: "Bearer 1|xgTuLgQ6q0DESOQsDqCC5FKicoaa0rKX2G..."
+         -> "Sikeres kijelentkezés"
+
+-TodoController létrehozása
+  php artisan make:controller TodoController
+-app/routes/api.php kiegészítése:
+  use App\Http\Controllers\TodoController;
+
+  Route::middleware('auth:sanctum')->group(function () {
+      Route::apiResource('todos', TodoController::class);
+  });
+  /*
+  ez 5 API végpontot hoz létre a Todo erőforráshoz:
+  GET /api/todos → index()
+  GET /api/todos/{todo} → show()
+  POST /api/todos → store()
+  PUT/PATCH /api/todos/{todo} → update()
+  DELETE /api/todos/{todo} → destroy()
+  */
+-Policy, ami kapcsolódik a Todo-hoz létrehozása
+  php artisan make:policy TodoPolicy --model=Todo
+-app/Policies/TodoPolicy.php módosítása
+<?php
+
+namespace App\Policies;
+
+use App\Models\Todo;
+use App\Models\User;
+use Illuminate\Auth\Access\Response;
+
+class TodoPolicy
+{
+    // Admin láthatja mindenki todo-ját, más csak a sajátját az index() metódusban lesz szűrve
+    public function viewAny(User $user): bool
+    {
+        return true;
+    }
+
+    public function view(User $user, Todo $todo): bool
+    {
+        return $user->is_admin || $user->id === $todo->user_id;
+    }
+
+    // Minden bejelentkezett user létrehozhat todo-t
+    public function create(User $user): bool
+    {
+        return true;
+    }
+
+    // Csak a saját todo-ját szerkesztheti
+    public function update(User $user, Todo $todo): bool
+    {
+        return $user->id === $todo->user_id;
+    }
+
+    /**
+     * Determine whether the user can delete the model.
+     */
+    public function delete(User $user, Todo $todo): bool
+    {
+        return $user->id === $todo->user_id;
+    }
+
+    /**
+     * Determine whether the user can restore the model.
+     */
+    public function restore(User $user, Todo $todo): bool
+    {
+        return false;
+    }
+
+    /**
+     * Determine whether the user can permanently delete the model.
+     */
+    public function forceDelete(User $user, Todo $todo): bool
+    {
+        return false;
+    }
+}
+-AuthServiceProvider létrehozása
+  php artisan make:provider AuthServiceProvider
+-app/Providers/AuthServiceProvider.php módosítása a policy-val
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
+use App\Models\Todo;
+use App\Policies\TodoPolicy;
+
+class AuthServiceProvider extends ServiceProvider
+{
+
+    
+    protected $policies = [
+        Todo::class => TodoPolicy::class,
+    ];
+
+
+    /**
+     * Register services.
+     */
+    public function register(): void
+    {
+        //
+    }
+
+    /**
+     * Bootstrap services.
+     */
+    public function boot(): void
+    {
+        $this->registerPolicies();
+    }
+}
+-app/Http/Controlls/TodoController.php módosítása:
+
+<?php
+namespace App\Http\Controllers;
+
+use App\Models\Todo;
+use Illuminate\Http\Request;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+
+class TodoController extends Controller
+{
+    use AuthorizesRequests;
+
+    public function index()
+    {
+        $this->authorize('viewAny', Todo::class);
+
+        $user = auth()->user();
+
+        $todos = $user->is_admin
+            ? Todo::all()
+            : $user->todos;
+
+        return response()->json($todos);
+    }
+
+    public function store(Request $request)
+    {
+        $this->authorize('create', Todo::class);
+
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+        ]);
+
+        $todo = auth()->user()->todos()->create($validated);
+
+        return response()->json($todo, 201);
+    }
+
+    public function show(Todo $todo)
+    {
+        $this->authorize('view', $todo);
+
+        return response()->json($todo);
+    }
+
+    public function update(Request $request, Todo $todo)
+    {
+        $this->authorize('update', $todo);
+
+       $validated = $request->validate([
+            'title' => 'string|max:255',
+            'description' => 'nullable|string',
+            'completed' => 'boolean',
+        ]);
+
+        $todo->update($validated);
+
+        return response()->json($todo);
+    }
+
+    public function destroy(Todo $todo)
+    {
+        $this->authorize('delete', $todo);
+    
+        $id = $todo->id;
+
+        $todo->delete();
+
+        return response()->json([
+            'message' => "A(z) {$id} azonosítójú rekord törölve.",            
+        ], 
+        202);
+    }
+}
+
+Postman tesztek a végpontokra
+-----------------------------
+
+ezt nem írom ide le
+
+AMI KIMARAD:
+------------
+CORS
+EnsureFrontendRequestsAreStateful
+
+
+utolsó előtti lépés:
+TESZTELÉS
+---------
+-AuthController tesztek: Cél: Ellenőrizni, hogy a regisztráció, bejelentkezés és kijelentkezés működik.
+  php artisan make:test AuthControllerTest
+
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+use PHPUnit\Framework\Attributes\Test;
+
+class AuthControllerTest extends TestCase
+{
+    use RefreshDatabase;
+
+    #[Test]
+    public function user_can_register()
+    {
+        // Arrange
+        $payload = [
+            'name' => 'Teszt Elek',
+            'email' => 'teszt@example.com',
+            'password' => 'password',
+            'password_confirmation' => 'password',
+        ];
+
+        // Act
+        $response = $this->postJson('/api/register', $payload);
+
+        // Assert
+        $response->assertStatus(201)
+                 ->assertJsonStructure(['user', 'message']);
+        $this->assertDatabaseHas('users', ['email' => 'teszt@example.com']);
+    }
+
+    #[Test]
+    public function user_can_login_and_receive_token()
+    {
+        // Arrange
+        $user = User::factory()->create([
+            'email' => 'teszt@example.com',
+            'password' => bcrypt('password'),
+        ]);
+
+        $credentials = [
+            'email' => 'teszt@example.com',
+            'password' => 'password',
+        ];
+
+        // Act
+        $response = $this->postJson('/api/login', $credentials);
+
+        // Assert
+        $response->assertStatus(200)
+                 ->assertJsonStructure(['access_token', 'token_type']);
+    }
+
+    #[Test]
+    public function user_can_logout()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $token = $user->createToken('auth_token')->plainTextToken;
+
+        // Act
+        $response = $this->withHeader('Authorization', 'Bearer ' . $token)
+                         ->postJson('/api/logout');
+
+        // Assert
+        $response->assertStatus(200)
+                 ->assertJson(['message' => 'Sikeres kijelentkezés']);
+    }
+}
+
+
+
+-TodoController tesztek: Cél: CRUD műveletek tesztelése, jogosultságokkal együtt.
+--database/factories/UserFactory módosítása:
+<?php
+
+namespace Database\Factories;
+
+use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
+
+/**
+ * @extends \Illuminate\Database\Eloquent\Factories\Factory<\App\Models\User>
+ */
+class UserFactory extends Factory
+{
+    /**
+     * The current password being used by the factory.
+     */
+    protected static ?string $password;
+
+    /**
+     * Define the model's default state.
+     *
+     * @return array<string, mixed>
+     */
+    public function definition(): array
+    {
+        return [
+            'name' => $this->faker->name(),
+            'email' => $this->faker->unique()->safeEmail(),
+            'email_verified_at' => now(),
+            'password' => static::$password ??= Hash::make('password'),
+            'remember_token' => Str::random(10),
+        ];
+    }
+
+    // Admin user létrehozása factory segítségével Policy teszteléshez
+    public function admin(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'is_admin' => true,
+        ]);
+    }
+
+    /**
+     * Indicate that the model's email address should be unverified.
+     */
+    public function unverified(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'email_verified_at' => null,
+        ]);
+    }
+}
+
+--TodoFactory létrehozása
+  php artisan make:factory TodoFactory --model=Todo
+
+<?php
+
+namespace Database\Factories;
+
+use Illuminate\Database\Eloquent\Factories\Factory;
+use App\Models\User;
+/**
+ * @extends \Illuminate\Database\Eloquent\Factories\Factory<\App\Models\Todo>
+ */
+class TodoFactory extends Factory
+{
+    /**
+     * Define the model's default state.
+     *
+     * @return array<string, mixed>
+     */
+    public function definition(): array
+    {
+        return [
+            'title' => $this->faker->sentence,
+            'description' => $this->faker->paragraph,
+            'completed' => $this->faker->boolean,
+            'user_id' => User::factory(), // kapcsolt user
+        ];
+    }
+}
+
+--Majd a TodoControllerTest létrehozása
+  php artisan make:test TodoControllerTest
+
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\User;
+use App\Models\Todo;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+use PHPUnit\Framework\Attributes\Test;
+use Illuminate\Foundation\Testing\WithFaker;
+
+class TodoControllerTest extends TestCase
+{
+    use RefreshDatabase, WithFaker;
+
+    #[Test]
+    public function user_can_create_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $payload = [
+            'title' => 'Teszt feladat',
+            'description' => 'Ez egy teszt leírás',
+        ];
+
+        // Act
+        $response = $this->actingAs($user)->postJson('/api/todos', $payload);
+
+        // Assert
+        $response->assertStatus(201)
+                 ->assertJsonFragment(['title' => 'Teszt feladat']);
+        $this->assertDatabaseHas('todos', ['title' => 'Teszt feladat']);
+    }
+
+    #[Test]
+    public function user_can_view_own_todos()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $response = $this->actingAs($user)->getJson('/api/todos');
+
+        // Assert
+        $response->assertStatus(200)
+                 ->assertJsonFragment(['id' => $todo->id]);
+    }
+
+    #[Test]
+    public function user_cannot_view_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        // Act
+        $response = $this->actingAs($user)->getJson("/api/todos/{$todo->id}");
+
+        // Assert
+        $response->assertStatus(403);
+    }
+
+    #[Test]
+    public function admin_can_view_all_todos()
+    {
+        // Arrange
+        $admin = User::factory()->create(['is_admin' => true]);
+        $todo = Todo::factory()->create();
+
+        // Act
+        $response = $this->actingAs($admin)->getJson('/api/todos');
+
+        // Assert
+        $response->assertStatus(200)
+                 ->assertJsonFragment(['id' => $todo->id]);
+    }
+
+    #[Test]
+    public function user_can_update_own_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        $updateData = ['title' => 'Frissített cím'];
+
+        // Act
+        $response = $this->actingAs($user)->putJson("/api/todos/{$todo->id}", $updateData);
+
+        // Assert
+        $response->assertStatus(200)
+                 ->assertJsonFragment(['title' => 'Frissített cím']);
+        $this->assertDatabaseHas('todos', ['title' => 'Frissített cím']);
+    }
+
+    #[Test]
+    public function user_cannot_update_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        $updateData = ['title' => 'Tiltott frissítés'];
+
+        // Act
+        $response = $this->actingAs($user)->putJson("/api/todos/{$todo->id}", $updateData);
+
+        // Assert
+        $response->assertStatus(403);
+    }
+
+    #[Test]
+    public function user_can_delete_own_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $response = $this->actingAs($user)->deleteJson("/api/todos/{$todo->id}");
+
+        // Assert
+        $response->assertStatus(202)
+                 ->assertJson(['message' => "A(z) {$todo->id} azonosítójú rekord törölve."]);
+        $this->assertDatabaseMissing('todos', ['id' => $todo->id]);
+    }
+
+    #[Test]
+    public function user_cannot_delete_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        // Act
+        $response = $this->actingAs($user)->deleteJson("/api/todos/{$todo->id}");
+
+        // Assert
+        $response->assertStatus(403);
+    }
+}
+
+
+
+
+-Policy tesztek: Biztosítani, hogy a TodoPolicy megfelelően működik.
+  php artisan make:test TodoPolicyTest --unit
+
+
+<?php
+
+namespace Tests\Unit;
+
+use App\Models\User;
+use App\Models\Todo;
+use App\Policies\TodoPolicy;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+use PHPUnit\Framework\Attributes\Test;
+
+class TodoPolicyTest extends TestCase
+{
+    use RefreshDatabase;
+
+    protected TodoPolicy $policy;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->policy = new TodoPolicy();
+    }
+
+    #[Test]
+    public function any_user_can_view_any_todo_list()
+    {
+        // Arrange
+        $user = User::factory()->create();
+
+        // Act
+        $result = $this->policy->viewAny($user);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function owner_can_view_their_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $result = $this->policy->view($user, $todo);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function non_owner_cannot_view_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        // Act
+        $result = $this->policy->view($user, $todo);
+
+        // Assert
+        $this->assertFalse($result);
+    }
+
+    #[Test]
+    public function admin_can_view_any_todo()
+    {
+        // Arrange
+        $admin = User::factory()->admin()->create();
+        $todo = Todo::factory()->create();
+
+        // Act
+        $result = $this->policy->view($admin, $todo);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function any_user_can_create_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+
+        // Act
+        $result = $this->policy->create($user);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function owner_can_update_their_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $result = $this->policy->update($user, $todo);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function non_owner_cannot_update_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        // Act
+        $result = $this->policy->update($user, $todo);
+
+        // Assert
+        $this->assertFalse($result);
+    }
+
+    #[Test]
+    public function owner_can_delete_their_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $result = $this->policy->delete($user, $todo);
+
+        // Assert
+        $this->assertTrue($result);
+    }
+
+    #[Test]
+    public function non_owner_cannot_delete_others_todo()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $todo = Todo::factory()->for($otherUser)->create();
+
+        // Act
+        $result = $this->policy->delete($user, $todo);
+
+        // Assert
+        $this->assertFalse($result);
+    }
+
+    #[Test]
+    public function restore_is_always_denied()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $result = $this->policy->restore($user, $todo);
+
+        // Assert
+        $this->assertFalse($result);
+    }
+
+    #[Test]
+    public function force_delete_is_always_denied()
+    {
+        // Arrange
+        $user = User::factory()->create();
+        $todo = Todo::factory()->for($user)->create();
+
+        // Act
+        $result = $this->policy->forceDelete($user, $todo);
+
+        // Assert
+        $this->assertFalse($result);
+    }
+}
+
+
+DOKUMENTÁLÁS
+------------
+-Postman collection
+composer require knuckleswtf/scribe --dev
+php artisan scribe:generate
+storage/app/private/scribe/collection.json ez lesz a Postman-ba importálható collection
+a Gyűjteményben a baseUrl a Variables fülön módosítani kell: http://127.0.0.1:8000
+
+-README vagy API dokumentáció
+Ha már előzőleg tesztelgettük a végpontokat postman-nal, akkor visszafele dolgozva exportáljuk a json-t, és a Geminivel generáltatunk egy API dokumentációt :)
+
+
+
+
+
+
+
